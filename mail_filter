@@ -1,0 +1,122 @@
+#!/bin/sh
+# Simple shell-based filter. It is meant to be invoked as follows:
+#       /path/to/script -f sender recipients...
+
+# Localize these. The -G option does nothing before Postfix 2.3.
+
+export LD_LIBRARY_PATH=/usr/local/lib
+
+INSPECT_DIR=/var/spool/mailfilter
+SENDMAIL="/usr/sbin/sendmail -G -i" # NEVER NEVER NEVER use "-t" here.
+
+# Exit codes from <sysexits.h>
+EX_TEMPFAIL=75
+EX_UNAVAILABLE=69
+
+# Clean up when done or when aborting.
+trap "rm -f in.$$" 0 1 2 3 15
+
+# Start processing.
+cd $INSPECT_DIR || {
+    echo $INSPECT_DIR does not exist; exit $EX_TEMPFAIL; }
+
+cat >in.$$ || { 
+    echo Cannot save mail to file; exit $EX_TEMPFAIL; }
+    
+# Specify your content filter here.
+# filter <in.$$ || {
+#   echo Message content rejected; exit $EX_UNAVAILABLE; }
+
+D="--"   #Multi Character Delimiter
+string="$@"
+
+
+# read email contents into an array with an element per newline
+sList=($(echo $string | sed -e 's/'"$D"'/\n/g' | while read line; do echo $line | sed 's/[\t ]/'"$D"'/g'; done))
+for (( i = 0; i < ${#sList[@]}; i++ )); do
+  sList[i]=$(echo ${sList[i]} | sed 's/'"$D"'/ /')
+done
+
+# /usr/local/bin/mail_filter -f ${sender} -- ${recipient}
+
+to=${sList[1]}
+from=${sList[0]}
+
+toemail=(`echo $to | tr "@" "\n"`);
+fromemailpre=(`echo $from | tr " " "\n"`);
+fromemail=(`echo ${fromemailpre[1]} | tr "@" "\n"`);
+
+uniq=`date +%s-$$`
+
+# check if this is an email being sent or received
+outtest="/home/vmail/${fromemail[1]}/${fromemail[0]}/"
+
+if [ -d $outtest ]
+then
+	archivedomain="${fromemail[1]}"
+	archiveuser="${fromemail[0]}archive"
+else
+	archivedomain="${toemail[1]}"
+	archiveuser="${toemail[0]}archive"
+fi
+
+if [ $archiveuser != ${fromemail[0]} ]
+then
+if [ $archiveuser != ${toemail[0]} ]
+then
+
+# make archive dir and .Sent dir if not exist
+if [ ! -d "/home/vmail/"$archivedomain"/"$archiveuser"/" ]
+then
+
+	maildirmake "/home/vmail/"$archivedomain"/"$archiveuser
+	maildirmake -f Sent "/home/vmail/"$archivedomain"/"$archiveuser
+	maildirmake -f Junk "/home/vmail/"$archivedomain"/"$archiveuser
+fi
+
+fi
+fi
+
+# archived email path
+outpath="/home/vmail/${fromemail[1]}/${fromemail[0]}archive/.Sent/cur/"
+inpath="/home/vmail/${toemail[1]}/${toemail[0]}archive/cur/"
+
+# get email header Message-Id
+eg=$(cat in.$$ | grep -i 'message-id:')
+w1="<"
+w2=">"
+msgid=$(echo $eg | awk -v w1="$w1" -v w2="$w2" 'match($0, w1 ".*" w2){
+   print substr($0,RSTART+length(w1),RLENGTH-length(w1 w2))}')
+
+newfile=mail.$uniq
+
+echo "newfile: "$newfile
+
+if [ -d $outtest ]
+then
+	# sending mail out
+
+	# archive copy
+	cp in.$$ $outpath$newfile
+	
+	# change permission for apache read access
+	chmod 777 $outpath$newfile
+
+	# add record of this email under the corresponding account in custom CRM
+	/usr/bin/php /usr/local/bin/mail2crmV2.php send $newfile ${fromemail[0]} ${fromemail[1]}
+
+else
+	# mail coming in
+	
+	# archive copy
+	cp in.$$ $inpath$newfile
+	
+	# change permission for apache read access
+	chmod 777 $inpath$newfile
+
+	# add record of this email under the corresponding account in custom CRM
+	/usr/bin/php /usr/local/bin/mail2crmV2.php receive $newfile ${toemail[0]} ${toemail[1]}
+
+fi
+
+exit $?
